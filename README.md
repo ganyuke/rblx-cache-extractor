@@ -1,5 +1,5 @@
-# embedded-png-extract
-A quick and dirty cross-platform python script that allows you to extract embedded PNG images from a binary file.
+# rblx-cache-extractor
+A quick and dirty cross-platform Python script that allows you to extract embedded PNGs, OGGs, MP3s, and KTX from Roblox binary cache files.
 
 ## Requirements
 Python 3

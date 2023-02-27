@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# extract embedded media from binaries.
+# Extract embedded media from binaries.
 
 import binascii
 import os
@@ -8,49 +8,33 @@ import re
 import shutil
 import sys
 
-if len(sys.argv) != 3:
-    print('Usage: ' + sys.argv[0] + ' <binary_file/directory> <destination_dir>')
-    print('<binary_file/directory> - the binary file or directory containing embedded audio, images, etc.')
-    print('<destination_dir> - the output directory where to save the extracted data')
-    sys.exit(1)
 
-source_file = sys.argv[1]
-destination_dir = sys.argv[2]
-# PNG Headers
+## HEXADECIMAL HEADERS
+# PNG
 PNG_HEADER = '89504e47'
 PNG_FOOTER = '49454e44ae426082'
-# OGG Headers
+# KTX
+KTX_HEADER = "4b5458203131"
+# OGG
 OGG_HEADER = '4f676753'
 # MP3 with ID3v2
 ID3_HEADER = '494433'
-# https in hex
+# HTTPS
 HTTPS_HEADER = "6874747073"
-# KTX header
-KTX_HEADER = "4b5458203131"
 
-amount = {
-    "png": 0,
-    "ogg": 0,
-    "mp3": 0,
-    "ktx": 0,
+# KTX should come before MP3, 
+# some KTX files appear to match the 
+# ID3 header for some reason.
+headers = {
+    "png": (PNG_HEADER, PNG_FOOTER),
+    "ktx": (KTX_HEADER,""),
+    "ogg": (OGG_HEADER,""),
+    "mp3": (ID3_HEADER,"")
 }
 
-error_extract = {
-    "Unknown": 0,
-    "Failed": 0
-}
 
-def write_file(file_type, body, file_name):
-    header, footer = "", ""
-    if file_type == "ogg":
-        header = OGG_HEADER
-    if file_type == "mp3":
-        header = ID3_HEADER
-    if file_type == "png":
-        header = PNG_HEADER
-        footer = PNG_FOOTER
-    if file_type == "ktx":
-        header = KTX_HEADER
+def write_file(dest, file_type, body, file_name):
+    header, footer = headers[file_type]
     if header == "":
         return "Error: File type unsupported."
 
@@ -60,12 +44,12 @@ def write_file(file_type, body, file_name):
     except binascii.Error:
         return "Error: File type unsupported."
     fname = 'rblx-' + file_name + '.' + file_type
-    writer = open(os.path.join(destination_dir + "/" + file_type, fname), 'wb+')
+    writer = open(os.path.join(dest + "/" + file_type, fname), 'wb+')
     writer.write(content_raw)
     writer.close()
 
 
-def extract_binary(file_path):
+def extract_binary(dest, file_path, counters):
     binary = open(file_path, 'rb')
     hexadecimal = binascii.hexlify(binary.read())
     _, file_name = os.path.split(file_path)
@@ -75,87 +59,74 @@ def extract_binary(file_path):
     hex_url = re.search(HTTPS_HEADER + "(.*?)00c8", decoded_file)
     if hex_url is None:
         # Happens when this file doesn't have any binary content, just a URL.
-        shutil.copy(file_path, destination_dir+"/unknown")
-        error_extract["Unknown"] += 1
-        return amount
+        shutil.copy(file_path, dest+"/unknown")
+        counters[1]["Unknown"] += 1
+        return counters
     cdn_url = bytearray.fromhex(hex_url.group()[:-4]).decode()
     file_name = cdn_url.split("/")[3]
 
-    # TODO: make less awful
+    for key in headers.keys():
+        if key == "png":
+            pattern = headers["png"][0] + "(.*?)" + headers["png"][1]
+        else:
+            pattern = headers[key][0] + "(.*)"
+        matches = re.findall(pattern, decoded_file)
+        if len(matches) == 1:
+            for body in matches:
+                if write_file(dest, key, body, file_name) is not None:
+                    print("ERROR FOUND IN FILE: " + file_path)
+                    shutil.copy(file_path, dest + "/failed")
+                    counters[1]["Failed"] += 1
+                else:
+                    counters[0][key] += 1
+            binary.close()
+            return counters
 
-    matches = re.findall(PNG_HEADER + "(.*?)" + PNG_FOOTER, decoded_file)
-
-    if len(matches) > 0:
-        for body in matches:
-            if write_file("png", body, file_name) is not None:
-                print("ERROR FOUND IN FILE: " + file_path)
-                shutil.copy(file_path, destination_dir + "/failed")
-                error_extract["Failed"] += 1
-            else:
-                amount["png"] += 1
-        binary.close()
-        return amount
-
-    matches = re.findall(OGG_HEADER + "(.*)", decoded_file)
-
-    if len(matches) == 1:
-        for body in matches:
-            if write_file("ogg", body, file_name) is not None:
-                print("ERROR FOUND IN FILE: " + file_path)
-                shutil.copy(file_path, destination_dir + "/failed")
-                error_extract["Failed"] += 1
-            else:
-                amount["ogg"] += 1
-        binary.close()
-        return amount
-
-    matches = re.findall(KTX_HEADER + "(.*)", decoded_file)
-
-    if len(matches) == 1:
-        for body in matches:
-            if write_file("ktx", body, file_name) is not None:
-                print("ERROR FOUND IN FILE: " + file_path)
-                shutil.copy(file_path, destination_dir + "/failed")
-                error_extract["Failed"] += 1
-            else:
-                amount["ktx"] += 1
-        binary.close()
-        return amount
-
-    matches = re.findall(ID3_HEADER + "(.*)", decoded_file)
-
-    if len(matches) == 1:
-        for body in matches:
-            if write_file("mp3", body, file_name) is not None:
-                print("ERROR FOUND IN FILE: " + file_path)
-                shutil.copy(file_path, destination_dir + "/failed")
-                error_extract["Failed"] += 1
-            else:
-                amount["mp3"] += 1
-        binary.close()
-        return amount
-
-    return amount
+    return counters
 
 
 def generate_directories(destination):
-    supported_extensions = ["png", "ogg", "mp3", "ktx", "unknown", "failed"]
-    for extension in supported_extensions:
-        if not os.path.exists(destination+"/"+extension):
-            os.makedirs(destination+"/"+extension)
+    for extension in [*headers.keys(), "unknown", "failed"]:
+        if not os.path.exists(destination + "/" + extension):
+            os.makedirs(destination + "/" + extension)
 
 
-if os.path.isdir(source_file):
-    print("Directory provided. Extracting all files...")
-    generate_directories(destination_dir)
-    files = os.listdir(source_file)
-    files = [f for f in files if os.path.isfile(source_file + '/' + f)]
-    for file in files:
-        extract_binary(source_file + "/" + file)
-    print("Done! Total extracted: " + str(sum(amount.values())))
-    for key in amount.keys():
-        print(key.upper() + " extracted: " + str(amount[key]))
-    for key in error_extract.keys():
-        print(key.upper() + " during extract: " + str(error_extract[key]))
-else:
-    extract_binary(source_file)
+def generate_counters():
+    counters = {key: 0 for (key) in headers.keys()}
+    errors = {
+        "Unknown": 0,
+        "Failed": 0
+    }
+    return counters, errors
+
+
+def main():
+    if len(sys.argv) != 3:
+        print('Usage: ' + sys.argv[0] + ' <binary_file/directory> <destination_dir>')
+        print('<binary_file/directory> - the binary file or directory containing embedded audio, images, etc.')
+        print('<destination_dir> - the output directory where to save the extracted data')
+        sys.exit(1)
+
+    src = sys.argv[1]
+    dir = sys.argv[2]
+
+    generate_directories(dir)
+    counter_list, error_list = generate_counters()
+
+    if os.path.isdir(src):
+        print("Directory provided. Extracting all files...")
+        files = os.listdir(src)
+        files = [f for f in files if os.path.isfile(src + '/' + f)]
+        for file in files:
+            counter_list, error_list = extract_binary(dir, src + "/" + file, (counter_list, error_list))
+    else:
+        counter_list, error_list = extract_binary(dir, src, (counter_list, error_list))
+
+    print("Done! Total extracted: " + str(sum(counter_list.values())))
+    for key in counter_list.keys():
+        print(key.upper() + " extracted: " + str(counter_list[key]))
+    for key in error_list.keys():
+        print(key.upper() + " during extract: " + str(error_list[key]))
+
+if __name__ == "__main__":
+    main()
